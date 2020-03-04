@@ -24,6 +24,12 @@ try:
 except:
     pass
 
+# pyarrow necessary for caching
+try:
+    import pyarrow as pa
+except:
+    pass
+
 from openpyxl import load_workbook
 import os.path
 
@@ -161,13 +167,13 @@ class IOEngine(object):
                     r.flushall()
                 else:
                     # allow deletion of keys by pattern matching
-                    if "*" in fname:
-                        x = r.keys(fname)
 
-                        if len(x) > 0:
-                            r.delete(x)
+                    x = r.keys('*' + fname)
 
-                    r.delete(fname)
+                    if len(x) > 0:
+                        r.delete(x)
+
+                    # r.delete(fname)
 
             except Exception as e:
                 self.logger.warning("Cannot delete non-existent key " + fname + " in Redis: " + str(e))
@@ -210,7 +216,8 @@ class IOEngine(object):
     def write_time_series_cache_to_disk(self, fname, data_frame,
                                         engine='hdf5_fixed', append_data=False, db_server=DataConstants().db_server,
                                         db_port=DataConstants().db_port, username=None, password=None,
-                                        filter_out_matching=None, timeout=10):
+                                        filter_out_matching=None, timeout=10,
+                                        use_cache_compression=DataConstants().use_cache_compression):
         """Writes Pandas data frame to disk as HDF5 format or bcolz format or in Arctic
 
         Parmeters
@@ -260,10 +267,28 @@ class IOEngine(object):
                 r = redis.StrictRedis(host=db_server, port=db_port, db=0, socket_timeout=timeout,
                                       socket_connect_timeout=timeout)
 
-                if isinstance(data_frame, pandas.DataFrame):
-                    r.set(fname, data_frame.to_msgpack(compress='blosc'))
+                if data_frame is not None:
+                    if isinstance(data_frame, pandas.DataFrame):
+                        # msgpack/blosc is deprecated
+                        # r.set(fname, data_frame.to_msgpack(compress='blosc'))
 
-                self.logger.info("Pushed " + fname + " to Redis")
+                        # now uses pyarrow
+                        context = pa.default_serialization_context()
+
+                        ser = context.serialize(data_frame).to_buffer()
+
+                        if use_cache_compression:
+                            comp = pa.compress(ser, codec='lz4', asbytes=True)
+                            siz = len(ser)  # siz = 3912
+
+                            r.set('comp_' + str(siz) + '_' + fname, comp)
+                        else:
+                            r.set(fname, ser.to_pybytes())
+
+                    self.logger.info("Pushed " + fname + " to Redis")
+                else:
+                    self.logger.info("Object " + fname + " is empty, not pushed to Redis.")
+
             except Exception as e:
                 self.logger.warning("Couldn't push " + fname + " to Redis: " + str(e))
 
@@ -316,6 +341,9 @@ class IOEngine(object):
 
                 data_frame = data_frame[new_cols]
 
+            # problems with Arctic when writing timezone to disk sometimes, so strip
+            data_frame = data_frame.copy().tz_localize(None)
+
             # can duplicate values if we have existing dates
             if append_data:
                 library.append(fname, data_frame)
@@ -332,7 +360,7 @@ class IOEngine(object):
             # append data only works for HDF5 stored as tables (but this is much slower than fixed format)
             # removes duplicated entries at the end
             if append_data:
-                store = pandas.HDFStore(h5_filename, format=hdf5_format, complib="blosc", complevel=9)
+                store = pandas.HDFStore(h5_filename, format=hdf5_format, complib="zlib", complevel=9)
 
                 if ('intraday' in fname):
                     data_frame = data_frame.astype('float32')
@@ -364,7 +392,7 @@ class IOEngine(object):
                 except:
                     pass
 
-                store = pandas.HDFStore(h5_filename_temp, format=hdf5_format, complib="blosc", complevel=9)
+                store = pandas.HDFStore(h5_filename_temp, format=hdf5_format, complib="zlib", complevel=9)
 
                 if ('intraday' in fname):
                     data_frame = data_frame.astype('float32')
@@ -524,9 +552,33 @@ class IOEngine(object):
 
                 msg = None
 
+                # for pyarrow
+                context = pa.default_serialization_context()
+
                 try:
                     r = redis.StrictRedis(host=db_server, port=db_port, db=0)
-                    msg = r.get(fname_single)
+
+                    # is there a compressed key?
+                    k = r.keys('comp_*_' + fname_single)
+
+                    # if so, then it means that we have stored it as a compressed object
+                    # if have more than 1 element, take the last (which will be the latest to be added)
+                    if (len(k) >= 1):
+                        k = k[-1].decode('utf-8')
+
+                        comp = r.get(k)
+
+                        siz = int(k.split('_')[1])
+                        dec = pa.decompress(comp, codec='lz4', decompressed_size=siz)
+
+                        msg = context.deserialize(dec)
+                    else:
+                        msg = r.get(fname_single)
+
+                        print(fname_single)
+                        if msg is not None:
+                            msg = context.deserialize(msg)
+                            #self.logger.warning("Key " + fname_single + " not in Redis cache?")
 
                 except:
                     self.logger.info("Cache not existent for " + fname_single + " in Redis")
@@ -534,10 +586,9 @@ class IOEngine(object):
                 if msg is None:
                     data_frame = None
                 else:
-
                     self.logger.info('Load Redis cache: ' + fname_single)
 
-                    data_frame = pandas.read_msgpack(msg)
+                    data_frame = msg # pandas.read_msgpack(msg)
 
             elif (engine == 'arctic'):
                 socketTimeoutMS = 2 * 1000
@@ -564,9 +615,10 @@ class IOEngine(object):
 
                     if start_date is None and finish_date is None:
                         item = library.read(fname_single)
+
                     else:
                         from arctic.date import DateRange
-                        item = library.read(fname_single, date_range=DateRange(start_date, finish_date))
+                        item = library.read(fname_single, date_range=DateRange(start_date.replace(tzinfo=None), finish_date.replace(tzinfo=None)))
 
                     c.close()
 
@@ -575,7 +627,7 @@ class IOEngine(object):
                     data_frame = item.data
 
                 except Exception as e:
-                    self.logger.warning('Library does not exist: ' + fname_single + ' & message is ' + str(e))
+                    self.logger.warning('Library may not exist or another error: ' + fname_single + ' & message is ' + str(e))
                     data_frame = None
 
             elif os.path.isfile(self.get_h5_filename(fname_single)):
@@ -832,18 +884,19 @@ class SpeedCache(object):
 
         # never want to include Logger object!
         key_drop.append('logger')
-
         key = []
 
         for k in obj.__dict__:
-            # provided the key is not in one of the dropped keys
-            if not (any(a == k for a in key_drop)):
-                add = obj.__dict__[k]
 
-                if add is not None:
-                    if isinstance(add, list): add = '_'.join(str(e) for e in add)
+            if 'api_key' not in k:
+                # provided the key is not in one of the dropped keys
+                if not (any(a == k for a in key_drop)):
+                    add = obj.__dict__[k]
 
-                key.append(str(k) + '-' + str(add))
+                    if add is not None:
+                        if isinstance(add, list): add = '_'.join(str(e) for e in add)
+
+                    key.append(str(k) + '-' + str(add))
 
         key.sort()
         key = '_'.join(str(e) for e in key).replace(type(obj).__name__, '').replace('___', '_')

@@ -117,9 +117,13 @@ class DataVendorQuandl(DataVendor):
 
         while(trials < 5):
             try:
-                data_frame = Quandl.get(market_data_request.tickers, authtoken=DataConstants().quandl_api_key, trim_start=market_data_request.start_date,
+                data_frame = Quandl.get(market_data_request.tickers,
+                                        authtoken=market_data_request.quandl_api_key, trim_start=market_data_request.start_date,
                                         trim_end=market_data_request.finish_date)
 
+                break
+            except SyntaxError:
+                logger.error("The tickers %s do not exist on Quandl." % market_data_request.tickers)
                 break
             except Exception as e:
                 trials = trials + 1
@@ -204,7 +208,7 @@ class DataVendorALFRED(DataVendor):
         for i in range(0, len(market_data_request.tickers)):
             while (trials < 5):
                 try:
-                    fred = Fred(api_key=DataConstants().fred_api_key)
+                    fred = Fred(api_key=market_data_request.fred_api_key)
 
                     # acceptable fields: close, actual-release, release-date-time-full
                     if 'close' in market_data_request.fields and 'release-date-time-full' in market_data_request.fields:
@@ -364,6 +368,7 @@ class DataVendorONS(DataVendor):
         return data_frame
 
     def download_daily(self, market_data_request):
+        logger = LoggerManager().getLogger(__name__)
         trials = 0
 
         data_frame = None
@@ -384,6 +389,8 @@ class DataVendorONS(DataVendor):
 
 #######################################################################################################################
 
+import pandas as pd
+
 class DataVendorBOE(DataVendor):
 
     def __init__(self):
@@ -396,23 +403,101 @@ class DataVendorBOE(DataVendor):
 
         logger.info("Request BOE data")
 
+
         data_frame = self.download_daily(market_data_request_vendor)
 
-        if data_frame is None or data_frame.index is []: return None
+        if data_frame is None or data_frame.index is []:
+            return None
 
         # convert from vendor to findatapy tickers/fields
         if data_frame is not None:
-            returned_tickers = data_frame.columns
+            if len(market_data_request.fields) == 1:
+                data_frame.columns = data_frame.columns.str.cat(
+                    market_data_request.fields * len(data_frame.columns), sep='.')
+            else:
+                logger.warning("Inconsistent number of fields and tickers.")
+                data_frame.columns = data_frame.columns.str.cat(
+                    market_data_request.fields, sep='.')
+            data_frame.index.name = 'Date'
 
+        logger.info("Completed request from BOE.")
+
+        return data_frame
+
+    def download_daily(self, market_data_request):
+        logger = LoggerManager().getLogger(__name__)
+        trials = 0
+
+        data_frame = None
+
+        boe_url = ("http://www.bankofengland.co.uk/boeapps/iadb/fromshowcolumns.asp"
+                   "?csv.x=yes&Datefrom={start_date}&Dateto={end_date}"
+                   "&SeriesCodes={tickers}"
+                   "&CSVF=TN&UsingCodes=Y&VPD=Y&VFD=N")
+        start_time = market_data_request.start_date.strftime("%d/%b/%Y")
+        end_time = market_data_request.finish_date.strftime("%d/%b/%Y")
+
+        while (trials < 5):
+            try:
+                data_frame = pd.read_csv(boe_url.format(start_date=start_time, end_date=end_time,
+                                                        tickers=','.join(market_data_request.tickers)),
+                                         index_col='DATE')
+                break
+            except:
+                trials = trials + 1
+                logger.info("Attempting... " + str(trials) + " request to download from BOE")
+
+        if trials == 5:
+            logger.error("Couldn't download from BoE after several attempts!")
+
+
+        return data_frame
+
+#######################################################################################################################
+
+try:
+    import yfinance as yf
+except:
+    pass
+
+class DataVendorYahoo(DataVendor):
+
+    def __init__(self):
+        super(DataVendorYahoo, self).__init__()
+
+    # implement method in abstract superclass
+    def load_ticker(self, market_data_request):
+        logger = LoggerManager().getLogger(__name__)
+        market_data_request_vendor = self.construct_vendor_market_data_request(market_data_request)
+
+        logger.info("Request Yahoo data")
+
+        data_frame = self.download_daily(market_data_request_vendor)
+
+        if data_frame is None or data_frame.index is []:
+            return None
+
+        # convert from vendor to findatapy tickers/fields
+        if data_frame is not None:
+            try:
+                if len(market_data_request.tickers) > 1:
+                    data_frame.columns = ['/'.join(col) for col in data_frame.columns.values]
+            except:
+                pass
+
+            returned_tickers = data_frame.columns
         if data_frame is not None:
             # tidy up tickers into a format that is more easily translatable
             # we can often get multiple fields returned (even if we don't ask for them!)
             # convert to lower case
-            returned_fields = [(x.split(' - ')[1]).lower().replace(' ', '-') for x in returned_tickers]
-            returned_fields = [x.replace('value', 'close') for x in returned_fields]  # special case for close
+            #returned_fields = [(x.split(' - ')[1]).lower().replace(' ', '-') for x in returned_tickers]
+            #returned_fields = [x.replace('value', 'close') for x in returned_fields]  # special case for close
 
-            returned_tickers = [x.replace('.', '/') for x in returned_tickers]
-            returned_tickers = [x.split(' - ')[0] for x in returned_tickers]
+
+            returned_fields = [x.split('/')[0].lower() for x in returned_tickers]
+
+            #returned_tickers = [x.replace('.', '/') for x in returned_tickers]
+            returned_tickers = [x.split('/')[1] for x in returned_tickers]
 
             fields = self.translate_from_vendor_field(returned_fields, market_data_request)
             tickers = self.translate_from_vendor_ticker(returned_tickers, market_data_request)
@@ -425,26 +510,37 @@ class DataVendorBOE(DataVendor):
             data_frame.columns = ticker_combined
             data_frame.index.name = 'Date'
 
-        logger.info("Completed request from BOE.")
+        logger.info("Completed request from Yahoo.")
 
         return data_frame
 
     def download_daily(self, market_data_request):
+        logger = LoggerManager().getLogger(__name__)
+
         trials = 0
 
         data_frame = None
 
+        ticker_list = ' '.join(market_data_request.tickers)
+        data_frame = yf.download(ticker_list, start=market_data_request.start_date, end=market_data_request.finish_date)
+
         while (trials < 5):
+
+
             try:
-                # TODO
+                data_frame = yf.download(ticker_list, start=market_data_request.start_date, end=market_data_request.finish_date)
 
                 break
-            except:
+            except Exception as e:
+                print(str(e))
                 trials = trials + 1
-                logger.info("Attempting... " + str(trials) + " request to download from BOE")
+                logger.info("Attempting... " + str(trials) + " request to download from Yahoo")
 
         if trials == 5:
             logger.error("Couldn't download from ONS after several attempts!")
+
+        if len(market_data_request.tickers) == 1:
+            data_frame.columns = [x + '/' + market_data_request.tickers[0] for x in data_frame.columns]
 
         return data_frame
 
@@ -594,9 +690,7 @@ class DataVendorPoloniex(DataVendor):
 
         market_data_request_vendor = self.construct_vendor_market_data_request(market_data_request)
 
-        self.logger.info("Request data from Poloniex")
-        
-
+        logger.info("Request data from Poloniex")
 
         poloniex_url = 'https://poloniex.com/public?command=returnChartData&currencyPair={}&start={}&end={}&period={}'
         if market_data_request_vendor.freq == 'intraday':
@@ -1239,20 +1333,46 @@ class DataVendorDukasCopy(DataVendor):
         from findatapy.util import SwimPool
         time_list = self.hour_range(market_data_request.start_date, market_data_request.finish_date)
 
-        # use threading (not process interface)
-        pool = SwimPool().create_pool('thread', DataConstants().market_thread_no['dukascopy'])
-        results = [pool.apply_async(self.fetch_file, args=(time, symbol,)) for time in time_list]
-        df_list = [p.get() for p in results]
+        do_retrieve_df = True  # convert inside loop?
+        multi_threaded = True # multithreading (can sometimes get errors but it's fine when retried)
 
-        pool.close()
-        pool.join()
+        if multi_threaded:
+            # use threading (not process interface)
+            pool = SwimPool().create_pool('thread', DataConstants().market_thread_no['dukascopy'])
+            results = [pool.apply_async(self.fetch_file, args=(time, symbol, do_retrieve_df,)) for time in time_list]
+            tick_list = [p.get() for p in results]
 
-        # fully single threaded
+            pool.close()
+            pool.join()
 
-        # df_list = []
-        #
-        # for time in time_list:
-        #     df_list.append(self.fetch_file(time, symbol))
+        else:
+            # fully single threaded
+
+            tick_list = []
+
+            for time in time_list:
+                tick_list.append(self.fetch_file(time, symbol, do_retrieve_df=do_retrieve_df))
+
+        if do_retrieve_df:
+            df_list = tick_list
+        else:
+            df_list = []
+
+            i = 0
+
+            time_list = self.hour_range(market_data_request.start_date, market_data_request.finish_date)
+
+            for time in time_list:
+                try:
+                    temp_df = self.retrieve_df(lzma.decompress(tick_list[i]), symbol, time)
+                except Exception as e:
+                    print(str(time) + ' ' + str(e))
+                    # print(str(e))
+                    temp_df = None
+
+                df_list.append(temp_df)
+
+                i = i + 1
 
         df_list = [x for x in df_list if x is not None]
 
@@ -1261,7 +1381,7 @@ class DataVendorDukasCopy(DataVendor):
         except:
             return None
 
-    def fetch_file(self, time, symbol):
+    def fetch_file(self, time, symbol, do_retrieve_df):
         logger = LoggerManager.getLogger(__name__)
         if time.hour % 24 == 0:
             logger.info("Downloading... " + str(time))
@@ -1276,6 +1396,7 @@ class DataVendorDukasCopy(DataVendor):
 
         tick = self.fetch_tick(DataConstants().dukascopy_base_url + tick_path)
 
+        #print(tick_path)
         if DataConstants().dukascopy_write_temp_tick_disk:
             out_path = DataConstants().temp_folder + "/dkticks/" + tick_path
 
@@ -1285,10 +1406,15 @@ class DataVendorDukasCopy(DataVendor):
 
             self.write_tick(tick, out_path)
 
-        try:
-            return self.retrieve_df(lzma.decompress(tick), symbol, time)
-        except Exception as e:
-            return None
+        if do_retrieve_df:
+            try:
+                return self.retrieve_df(lzma.decompress(tick), symbol, time)
+            except Exception as e:
+                #print(tick_path + ' ' + str(e))
+                #print(str(e))
+                return None
+
+        return tick
 
     def fetch_tick(self, tick_url):
         i = 0
@@ -1299,14 +1425,16 @@ class DataVendorDukasCopy(DataVendor):
         logger.debug("Loading URL " + tick_url)
 
         # try up to 5 times to download
-        while i < 10:
+        while i < 20:
             try:
                 tick_request = requests.get(tick_url, timeout = 10)
 
                 tick_request_content = tick_request.content
                 tick_request.close()
 
-                break
+                # can sometimes get back an error HTML page, in which case retry
+                if 'error' not in str(tick_request_content):
+                    break
             except Exception as e:
                 logger.warning("Problem downloading.. " + str(e))
                 i = i + 1
@@ -1373,6 +1501,7 @@ class DataVendorDukasCopy(DataVendor):
         # note: Numba can speed up for loops
         for row in chunks_list:
             d = struct.unpack(">LLLff", row)
+            #d = struct.unpack('>3i2f', row)
             date.append((epoch + timedelta(0,0,0, d[0])))
 
             # SLOW: no point using named tuples!
@@ -2184,7 +2313,7 @@ class DataVendorAlphaVantage(DataVendor):
     def download(self, market_data_request):
         trials = 0
 
-        ts = TimeSeries(key=DataConstants().alpha_vantage_api_key, output_format='pandas', indexing_type='date')
+        ts = TimeSeries(key=market_data_request.alpha_vantage_api_key, output_format='pandas', indexing_type='date')
 
         data_frame = None
 

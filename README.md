@@ -3,7 +3,7 @@
 # [findatapy](https://github.com/cuemacro/findatapy)
 
 findatapy creates an easy to use Python API to download market data from many sources including Quandl, Bloomberg, Yahoo, Google etc. using
-a unified high level interface. Users can also define their own custom tickers, using configuraiton files. There is also functionality which
+a unified high level interface. Users can also define their own custom tickers, using configuration files. There is also functionality which
 is particularly useful for those downloading FX market data. Below example shows how to download AUDJPY data from Quandl (and automatically 
 calculates this via USD crosses).
 
@@ -44,7 +44,7 @@ documented
 # Contributors
 
 Contributors are always welcome for finmarketpy, findatapy and chartpy. If you'd like to contribute, have a look at
-[Planned Features](PLANNED_FEATURES.md] for areas we're looking for help on. Or if you have any ideas for improvements
+[Planned Features](PLANNED_FEATURES.md) for areas we're looking for help on. Or if you have any ideas for improvements
 to the libriares please let us know too!
 
 # Gallery
@@ -54,7 +54,7 @@ To appear
 # Requirements
 
 Major requirements
-* Required: Python 3.4, 3.5
+* Required: Python 3.6
 * Required: pandas, numpy etc.
 * Recommended: blpapi - Bloomberg Python Open API
 * Recommended: chartpy - for funky interactive plots ([https://github.com/cuemacro/chartpy](https://github.com/cuemacro/chartpy)) and
@@ -68,11 +68,36 @@ For detailed installation instructions for chartpy, findatapy & finmarketpy and 
 [https://github.com/cuemacro/finmarketpy/blob/master/INSTALL.md](https://github.com/cuemacro/finmarketpy/blob/master/INSTALL.md). The tutorial includes details on how to setup your entire Python environment.
 
 You can install the library using the below. After installation:
-* Make sure you edit the DataConstants class for the correct Quandl API and Twitter API keys etc
+* Make sure you edit the dataconstants class for the correct Quandl API and Twitter API keys etc.
+* Or you can run set_api_keys.py script to set the API keys via storing in your keyring
+* Or you can create a datacred.py file which overwrites these keys
 
 ```
 pip install git+https://github.com/cuemacro/findatapy.git
 ```
+
+# Couldn't push MarketDataRequest message
+
+You might often get an error like the below, when you are downloading market data with
+findatapy, and you don't have Redis installed.
+
+```
+Couldn't push MarketDataRequest
+```
+
+findatapy includes an in-memory caching mechanism, which uses Redis
+a key/value in-memory store. The idea is that if we do exactly the same data download
+call with the same parameters of a MarketDataRequest it will check this volatile cache
+first, before going out to our external data provider (eg. Quandl).
+
+Note, that Redis is usually set up as volatile cache, so once your computer is turned off, this cache
+will be lost.
+
+If Redis is not installed, this caching will fail and you'll
+get this error. However, all other functionality aside from the caching will be fine. All
+findatapy will do is to always go externally to download market data. Redis is available for Linux.
+There is also an unsupported (older) Windows version available, which I've found works fine, 
+although it lacks some functionality of later Redis versions.
 
 # findatapy examples
 
@@ -84,6 +109,33 @@ In findatapy/examples you will find several demos
 
 # Coding log
 
+* 30 Dec 2019
+    * Added message about lack of Redis
+* 17 Dec 2019
+    * Fix issue with Redis cache if two similar elements cached (takes the last now)
+* 16 Dec 2019
+    * Fix problem with missing Redis dependency when reading from market
+* 04 Dec 2019
+    * Allow usage on Azure Notebooks, by making keyring dependency optional
+* 03 Nov 2019
+    * Added script to set API keys with keyring
+* 02 Nov 2019
+    * Added BoE as a data source
+    * Removed blosc/msgpack (msgpack deprecated in pandas) and replaced with pyarrow for caching 
+    * Uses keyring library for API keys (unless specified in DataCred)
+    * Began to add tests for IO and market data download
+* 03 Oct 2019
+    * Remove API key from cache
+    * Remove timezone when storing in Arctic (can cause issues with later versions of Pandas)
+* 14 Aug 2019
+    * Bloomberg downloaders now works with Pandas 0.25
+    * Fixed Yahoo downloader to work with yfinance (replacing pandas_datareader for Yahoo)
+* 06 Aug 2019
+    * Adding parameters to MarketDataRequest for user specified API keys (Quandl, FRED & Alpha Vantage)
+* 23 Jul 2019
+    * Changed some rolling calculations in Calculation class to work with newer pandas
+* 12 Jul 2019
+    * Fixed issues with DukasCopy downloading when using multi-threading
 * 01 Mar 2019
     * Added read/write Parquet
     * Added concat dataframes
